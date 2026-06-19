@@ -5,7 +5,7 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 const EXAMPLES = [
   { name: "Rolipram", smiles: "O=C1CN(CCc2ccc(OC)c(OC)c2)CC1" },
   { name: "Sivelestat", smiles: "CC1=CC=C(C=C1)S(=O)(=O)NC2=CC=CC=C2OCC(=O)O" },
-  { name: "Roflumilast", smiles: "O=C(Nc1ccc(Cl)cc1Cl)c1cnc(OCC(F)(F)F)c(OCC(F)(F)F)c1" },
+  { name: "MK-0952", smiles: "O=C(NC1CC1)c1cn(-c2cccc(-c3cccc(C4CC4C(=O)O)c3)c2)c2ncccc2c1=O" },
 ];
 
 const CLASS_INFO = {
