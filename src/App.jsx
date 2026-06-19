@@ -15,52 +15,79 @@ const CLASS_INFO = {
 };
 const CLASS_KEYS = Object.keys(CLASS_INFO);
 
-/* ── Animated SVG background ── */
+/* ── Background ── */
 function Background() {
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
-      <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style={{ position: "absolute", inset: 0 }}>
-        <defs>
-          <radialGradient id="g1" cx="20%" cy="20%" r="60%">
-            <stop offset="0%" stopColor="#0ea5e9" stopOpacity="0.07" />
-            <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="g2" cx="80%" cy="70%" r="55%">
-            <stop offset="0%" stopColor="#818cf8" stopOpacity="0.06" />
-            <stop offset="100%" stopColor="#818cf8" stopOpacity="0" />
-          </radialGradient>
-          <radialGradient id="g3" cx="60%" cy="10%" r="40%">
-            <stop offset="0%" stopColor="#f472b6" stopOpacity="0.05" />
-            <stop offset="100%" stopColor="#f472b6" stopOpacity="0" />
-          </radialGradient>
-        </defs>
-        <rect width="100%" height="100%" fill="#060912" />
-        <rect width="100%" height="100%" fill="url(#g1)" />
-        <rect width="100%" height="100%" fill="url(#g2)" />
-        <rect width="100%" height="100%" fill="url(#g3)" />
-        {/* Hexagon grid */}
-        {Array.from({ length: 80 }).map((_, i) => {
-          const col = i % 10, row = Math.floor(i / 10);
-          const x = col * 120 + (row % 2) * 60 + 20;
-          const y = row * 104 + 20;
-          const size = 36;
+      <style>{`
+        @keyframes floatA { 0%,100%{transform:translate(0,0)} 50%{transform:translate(18px,-22px)} }
+        @keyframes floatB { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-14px,18px)} }
+        @keyframes floatC { 0%,100%{transform:translate(0,0)} 50%{transform:translate(20px,12px)} }
+        @keyframes twinkle { 0%,100%{opacity:0.15} 50%{opacity:0.7} }
+      `}</style>
+
+      {/* Base */}
+      <div style={{ position:"absolute", inset:0, background:"#060912" }} />
+
+      {/* Large soft glows */}
+      <div style={{
+        position:"absolute", top:"-10%", left:"-5%",
+        width:"55vw", height:"55vw", borderRadius:"50%",
+        background:"radial-gradient(circle, rgba(56,189,248,0.13) 0%, transparent 70%)",
+        animation:"floatA 12s ease-in-out infinite",
+      }}/>
+      <div style={{
+        position:"absolute", bottom:"-15%", right:"-5%",
+        width:"50vw", height:"50vw", borderRadius:"50%",
+        background:"radial-gradient(circle, rgba(129,140,248,0.11) 0%, transparent 70%)",
+        animation:"floatB 15s ease-in-out infinite",
+      }}/>
+      <div style={{
+        position:"absolute", top:"30%", right:"20%",
+        width:"35vw", height:"35vw", borderRadius:"50%",
+        background:"radial-gradient(circle, rgba(244,114,182,0.08) 0%, transparent 70%)",
+        animation:"floatC 18s ease-in-out infinite",
+      }}/>
+
+      {/* Hex grid — more visible */}
+      <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"
+        style={{ position:"absolute", inset:0 }}>
+        {Array.from({ length: 120 }).map((_, i) => {
+          const col = i % 12, row = Math.floor(i / 12);
+          const x = col * 110 + (row % 2) * 55 + 10;
+          const y = row * 95 + 10;
+          const size = 38;
           const pts = Array.from({ length: 6 }, (__, k) => {
             const a = (Math.PI / 3) * k - Math.PI / 6;
             return `${x + size * Math.cos(a)},${y + size * Math.sin(a)}`;
           }).join(" ");
+          const colors = ["rgba(56,189,248,0.07)","rgba(129,140,248,0.06)","rgba(244,114,182,0.05)"];
+          const stroke = colors[i % 3];
           return (
-            <polygon key={i} points={pts}
-              fill="none"
-              stroke="rgba(148,163,184,0.035)"
-              strokeWidth="1"
+            <polygon key={i} points={pts} fill="none" stroke={stroke} strokeWidth="1" />
+          );
+        })}
+      </svg>
+
+      {/* Star-like dots */}
+      <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg"
+        style={{ position:"absolute", inset:0 }}>
+        {Array.from({ length: 40 }).map((_, i) => {
+          const x = ((i * 137.5) % 100).toFixed(1);
+          const y = ((i * 97.3) % 100).toFixed(1);
+          const r = (0.8 + (i % 3) * 0.6).toFixed(1);
+          const colors = ["#38bdf8","#818cf8","#f472b6","#ffffff"];
+          const c = colors[i % 4];
+          const delay = `${(i * 0.37).toFixed(1)}s`;
+          const dur = `${2.5 + (i % 4) * 0.8}s`;
+          return (
+            <circle key={i} cx={`${x}%`} cy={`${y}%`} r={r}
+              fill={c} opacity="0.3"
+              style={{ animation:`twinkle ${dur} ${delay} ease-in-out infinite` }}
             />
           );
         })}
       </svg>
-      <style>{`
-        @keyframes pulse1 { 0%,100%{opacity:0.7} 50%{opacity:1} }
-        @keyframes pulse2 { 0%,100%{opacity:0.5} 50%{opacity:0.9} }
-      `}</style>
     </div>
   );
 }
@@ -385,34 +412,34 @@ export default function App() {
         {/* ── Hero ── */}
         <div style={{ textAlign: "center", padding: "72px 48px 56px" }}>
           <div style={{
-            display: "inline-flex", alignItems: "center", gap: 8,
+            display: "inline-block",
             fontSize: 11, letterSpacing: 3, textTransform: "uppercase",
-            color: "#38bdf8", border: "1px solid rgba(56,189,248,0.25)",
-            borderRadius: 100, padding: "5px 16px", marginBottom: 28,
+            color: "#38bdf8", border: "1px solid rgba(56,189,248,0.3)",
+            borderRadius: 100, padding: "4px 14px", marginBottom: 24,
             background: "rgba(56,189,248,0.05)",
           }}>
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#38bdf8", display: "inline-block" }} />
-            Polypharmacology Prediction Engine
+            Polypharmacology Prediction
           </div>
 
           <h1 style={{
-            fontSize: "clamp(30px,4.5vw,52px)", fontWeight: 900,
-            letterSpacing: -2, lineHeight: 1.08, margin: "0 0 20px",
+            fontSize: "clamp(32px, 5vw, 54px)",
+            fontWeight: 800, letterSpacing: -1.5,
+            margin: "0 0 16px", lineHeight: 1.1,
           }}>
-            Scan molecules for<br />
+            Predict dual-target activity<br />
             <span style={{
-              background: "linear-gradient(100deg, #38bdf8 0%, #818cf8 50%, #f472b6 100%)",
+              background: "linear-gradient(90deg, #38bdf8, #818cf8, #f472b6)",
               WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
             }}>
-              dual-target activity
+              from a single SMILES string
             </span>
           </h1>
 
           <p style={{
-            fontSize: 15, color: "#64748b", maxWidth: 500,
-            margin: "0 auto 0", lineHeight: 1.75,
+            fontSize: 16, color: "#64748b", maxWidth: 520,
+            margin: "0 auto 48px", lineHeight: 1.7,
           }}>
-            Submit one or many SMILES strings — as text or a file — and Pharosis classifies each compound against PDE4B and Neutrophil Elastase using a 70/30 voting ensemble.
+            Submit one or many SMILES — as text or a file — and Pharosis classifies each compound against PDE4B and Neutrophil Elastase using a 70/30 voting ensemble of two XGBoost models.
           </p>
         </div>
 
