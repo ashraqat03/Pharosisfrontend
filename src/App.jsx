@@ -439,7 +439,7 @@ export default function App() {
             fontSize: 16, color: "#64748b", maxWidth: 520,
             margin: "0 auto 48px", lineHeight: 1.7,
           }}>
-            Submit one or many SMILES — as text or a file — and Pharosis classifies each compound against PDE4B and Neutrophil Elastase using a 70/30 voting ensemble of two XGBoost models.
+            Submit one or many SMILES, as text or a file, and Pharosis classifies each compound against PDE4B and Neutrophil Elastase using a 70/30 voting ensemble of two XGBoost models.
           </p>
         </div>
 
@@ -475,7 +475,7 @@ export default function App() {
             {mode === "text" ? (
               <>
                 <div style={{ fontSize: 11, color: "#475569", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
-                  SMILES — one per line, or comma-separated
+                  SMILES one per line, or comma-separated
                 </div>
                 <textarea
                   value={textInput}
@@ -528,7 +528,7 @@ export default function App() {
                 ) : (
                   <>
                     <div style={{ color: "#94a3b8", marginBottom: 6 }}>Drop a .txt, .csv, or .smi file</div>
-                    <div style={{ color: "#334155", fontSize: 12 }}>or click to browse — one SMILES per line</div>
+                    <div style={{ color: "#334155", fontSize: 12 }}>or click to browse, one SMILES per line</div>
                   </>
                 )}
               </div>
@@ -606,8 +606,8 @@ export default function App() {
             Pharosis is a research tool developed as part of a computational drug discovery thesis. It predicts
             whether a small molecule selectively inhibits <strong style={{ color: "#38bdf8" }}>PDE4B</strong>,
             selectively inhibits <strong style={{ color: "#818cf8" }}>Neutrophil Elastase (NE)</strong>, or hits
-            both targets simultaneously — a polypharmacology profile of interest in
-            <strong style={{ color: "#f472b6" }}> inflammatory disease</strong> research. Submit any number of
+            both targets simultaneously, a polypharmacology profile of interest in
+            <strong style={{ color: "#f472b6" }}> Cystic Fibrosis</strong> and other inflammatory disease research . Submit any number of
             compounds at once and export results as CSV.
           </p>
         </div>
@@ -668,7 +668,7 @@ export default function App() {
           display: "flex", justifyContent: "space-between", alignItems: "center",
           fontSize: 12, color: "#1e293b",
         }}>
-          <span>Pharosis — Computational Drug Discovery Research</span>
+          <span>Pharosis: Computational Drug Discovery Research</span>
           <span>RDKit · XGBoost · React · Vite</span>
         </div>
       </div>
