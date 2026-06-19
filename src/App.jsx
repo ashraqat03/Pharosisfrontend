@@ -1,213 +1,650 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import joblib
-import numpy as np
-import os
+import { useState, useRef, useCallback } from "react";
 
-# ── RDKit ────────────────────────────────────────────────────
-from rdkit import Chem
-from rdkit.Chem import Descriptors, rdMolDescriptors, MACCSkeys
-from rdkit.Chem.Pharm2D import Generate
-from rdkit.Chem.Pharm2D.SigFactory import SigFactory
-from rdkit import RDLogger
-from rdkit.Chem import ChemicalFeatures
-from rdkit.Chem import rdFingerprintGenerator
-from itertools import combinations
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
-RDLogger.DisableLog("rdApp.*")
+const EXAMPLES = [
+  { name: "Rolipram", smiles: "O=C1CN(CCc2ccc(OC)c(OC)c2)CC1" },
+  { name: "Sivelestat", smiles: "CC1=CC=C(C=C1)S(=O)(=O)NC2=CC=CC=C2OCC(=O)O" },
+  { name: "Roflumilast", smiles: "O=C(Nc1ccc(Cl)cc1Cl)c1cnc(OCC(F)(F)F)c(OCC(F)(F)F)c1" },
+];
 
-app = Flask(__name__)
-CORS(app)
+const CLASS_INFO = {
+  "PDE4B only":        { color: "#38bdf8", glow: "rgba(56,189,248,0.18)",  icon: "◈", short: "PDE4B" },
+  "NE only":           { color: "#818cf8", glow: "rgba(129,140,248,0.18)", icon: "◇", short: "NE" },
+  "PDE4B + NE (Dual)": { color: "#f472b6", glow: "rgba(244,114,182,0.22)", icon: "⬡", short: "DUAL" },
+};
+const CLASS_KEYS = Object.keys(CLASS_INFO);
 
-# ── Load ensemble ────────────────────────────────────────────
-print("Loading ensemble...")
-ensemble = joblib.load("voting_ensemble.pkl")
+/* ── Animated SVG background ── */
+function Background() {
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none", overflow: "hidden" }}>
+      <svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" style={{ position: "absolute", inset: 0 }}>
+        <defs>
+          <radialGradient id="g1" cx="20%" cy="20%" r="60%">
+            <stop offset="0%" stopColor="#0ea5e9" stopOpacity="0.07" />
+            <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0" />
+          </radialGradient>
+          <radialGradient id="g2" cx="80%" cy="70%" r="55%">
+            <stop offset="0%" stopColor="#818cf8" stopOpacity="0.06" />
+            <stop offset="100%" stopColor="#818cf8" stopOpacity="0" />
+          </radialGradient>
+          <radialGradient id="g3" cx="60%" cy="10%" r="40%">
+            <stop offset="0%" stopColor="#f472b6" stopOpacity="0.05" />
+            <stop offset="100%" stopColor="#f472b6" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+        <rect width="100%" height="100%" fill="#060912" />
+        <rect width="100%" height="100%" fill="url(#g1)" />
+        <rect width="100%" height="100%" fill="url(#g2)" />
+        <rect width="100%" height="100%" fill="url(#g3)" />
+        {/* Hexagon grid */}
+        {Array.from({ length: 80 }).map((_, i) => {
+          const col = i % 10, row = Math.floor(i / 10);
+          const x = col * 120 + (row % 2) * 60 + 20;
+          const y = row * 104 + 20;
+          const size = 36;
+          const pts = Array.from({ length: 6 }, (__, k) => {
+            const a = (Math.PI / 3) * k - Math.PI / 6;
+            return `${x + size * Math.cos(a)},${y + size * Math.sin(a)}`;
+          }).join(" ");
+          return (
+            <polygon key={i} points={pts}
+              fill="none"
+              stroke="rgba(148,163,184,0.035)"
+              strokeWidth="1"
+            />
+          );
+        })}
+      </svg>
+      <style>{`
+        @keyframes pulse1 { 0%,100%{opacity:0.7} 50%{opacity:1} }
+        @keyframes pulse2 { 0%,100%{opacity:0.5} 50%{opacity:0.9} }
+      `}</style>
+    </div>
+  );
+}
 
-model_all     = ensemble["model_all"]
-model_spatial = ensemble["model_spatial"]
-feat_cols_all = ensemble["feat_cols_all"]
-feat_cols_sp  = ensemble["feat_cols_spatial"]
-label_map_inv = ensemble["label_map_inv"]   # {0: 'PDE4B only', 1: 'NE only', 2: 'PDE4B + NE (Dual)'}
-W_ALL         = ensemble["w_all"]           # 0.7
-W_SP          = ensemble["w_spatial"]       # 0.3
-print(f"Ensemble loaded ✓  weights: {W_ALL}/{W_SP}")
+/* ── Logo ── */
+function Logo({ size = 28 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="none">
+      <polygon points="16,2 29,9 29,23 16,30 3,23 3,9"
+        stroke="#38bdf8" strokeWidth="1.5" fill="rgba(56,189,248,0.07)" />
+      <polygon points="16,8 23,12 23,20 16,24 9,20 9,12"
+        stroke="#818cf8" strokeWidth="1" fill="rgba(129,140,248,0.06)" />
+      <circle cx="16" cy="16" r="3" fill="#f472b6" />
+      <circle cx="16" cy="16" r="1.2" fill="#fff" />
+    </svg>
+  );
+}
 
-# ── Rebuild SigFactory (same as Step 5 / Step 6) ─────────────
-GOBBI_FDEF = """
-AtomType NDonor [N;!H0;v3,v4&+1]
-AtomType ChalcDonor [O,S;H1;+0]
-DefineFeature SingleAtomDonor [{NDonor},{ChalcDonor}]
-  Family HBDonor
-  Weights 1
-EndFeature
+/* ── Prob bar ── */
+function ProbBar({ label, value, color }) {
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <span style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace" }}>{label}</span>
+        <span style={{ fontSize: 11, color, fontWeight: 700, fontFamily: "monospace" }}>{(value * 100).toFixed(1)}%</span>
+      </div>
+      <div style={{ background: "rgba(255,255,255,0.05)", borderRadius: 3, height: 4 }}>
+        <div style={{
+          width: `${value * 100}%`, height: "100%",
+          background: `linear-gradient(90deg,${color}66,${color})`,
+          borderRadius: 3, transition: "width 0.9s cubic-bezier(.4,0,.2,1)",
+        }} />
+      </div>
+    </div>
+  );
+}
 
-AtomType NAcceptor [$([N;H0;$(N(~[!#1])(~[!#1])~[!#1])])]
-AtomType NAcceptor2 [n;H0;+0]
-AtomType OAcceptor [O;H0;+0]
-DefineFeature SingleAtomAcceptor [{NAcceptor},{NAcceptor2},{OAcceptor}]
-  Family HBAcceptor
-  Weights 1
-EndFeature
+/* ── Single result card ── */
+function ResultCard({ item, index }) {
+  const info = CLASS_INFO[item.prediction] || CLASS_INFO["PDE4B only"];
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{
+      background: "rgba(255,255,255,0.025)",
+      border: `1px solid ${info.color}44`,
+      borderRadius: 14,
+      overflow: "hidden",
+      boxShadow: `0 0 24px ${info.glow}`,
+      marginBottom: 12,
+    }}>
+      {/* Header row */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 12, padding: "14px 18px",
+        cursor: "pointer", userSelect: "none",
+      }} onClick={() => setOpen(o => !o)}>
+        <span style={{
+          fontSize: 11, fontFamily: "monospace", color: "#475569",
+          background: "rgba(255,255,255,0.05)", borderRadius: 6,
+          padding: "2px 8px", minWidth: 28, textAlign: "center",
+        }}>#{index + 1}</span>
 
-DefineFeature AcidicGroup [C,S](=[O,S,P])-[O;H1,H0&-1]
-  Family NegIonizable
-  Weights 1.0,1.0,1.0
-EndFeature
+        {/* Prediction badge */}
+        <span style={{
+          fontSize: 11, fontWeight: 700, letterSpacing: 1,
+          color: info.color,
+          background: `${info.color}18`,
+          border: `1px solid ${info.color}44`,
+          borderRadius: 6, padding: "3px 10px",
+        }}>{info.icon} {info.short}</span>
 
-DefineFeature BasicGroup [N;H1&+0,H2&+0]!@[!N]
-  Family PosIonizable
-  Weights 1.0,1.0
-EndFeature
+        {/* Confidence */}
+        <span style={{ fontSize: 13, fontWeight: 700, color: info.color, marginLeft: 2 }}>
+          {item.confidence_pct}%
+        </span>
 
-AtomType Carbon_Aromatic [c]
-AtomType Carbon_NonPolar [C;H0&r3&!$(CC(=O)N)&!$(CC(=O)O),$([CH,CH2;r3])]
-DefineFeature Hydrophobe [{Carbon_Aromatic},{Carbon_NonPolar}]
-  Family Hydrophobe
-  Weights 1.0
-EndFeature
+        {/* Models agree badge */}
+        <span style={{
+          fontSize: 10, padding: "2px 8px", borderRadius: 100,
+          background: item.models_agree ? "rgba(34,197,94,0.08)" : "rgba(251,191,36,0.08)",
+          border: `1px solid ${item.models_agree ? "rgba(34,197,94,0.25)" : "rgba(251,191,36,0.25)"}`,
+          color: item.models_agree ? "#4ade80" : "#fbbf24",
+          marginLeft: "auto",
+        }}>
+          {item.models_agree ? "✓ Agree" : "⚠ Disagree"}
+        </span>
 
-AtomType AromN [n]
-AtomType AromC [c]
-DefineFeature Aromatic [{AromN},{AromC}]
-  Family Aromatic
-  Weights 1.0
-EndFeature
-"""
+        {/* SMILES truncated */}
+        <span style={{ fontSize: 10, color: "#334155", fontFamily: "monospace",
+          maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {item.smiles}
+        </span>
 
-_fdef_path = "/tmp/gobbi.fdef"
-with open(_fdef_path, "w") as f:
-    f.write(GOBBI_FDEF)
+        <span style={{ color: "#475569", fontSize: 12, marginLeft: 4 }}>{open ? "▲" : "▼"}</span>
+      </div>
 
-_feat_factory = ChemicalFeatures.BuildFeatureFactory(_fdef_path)
-_sig_factory  = SigFactory(_feat_factory, minPointCount=2, maxPointCount=3)
-_sig_factory.SetBins([(0, 2), (2, 5), (5, 8)])
-_sig_factory.Init()
+      {/* Expanded detail */}
+      {open && (
+        <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", padding: "16px 18px" }}>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+            {/* Ensemble probs */}
+            <div style={{ flex: 2, minWidth: 200 }}>
+              <div style={{ fontSize: 10, color: "#475569", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
+                Ensemble Probabilities
+              </div>
+              {CLASS_KEYS.map(k => (
+                <ProbBar key={k} label={k} value={item.ensemble_probs[k]} color={CLASS_INFO[k].color} />
+              ))}
+            </div>
+            {/* Model A */}
+            <div style={{ flex: 1, minWidth: 160 }}>
+              <div style={{ fontSize: 10, color: "#475569", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
+                Model A (All features)
+              </div>
+              <div style={{ fontSize: 12, color: CLASS_INFO[item.model_all_pred]?.color, fontWeight: 600, marginBottom: 6 }}>
+                {item.model_all_pred}
+              </div>
+              {CLASS_KEYS.map(k => (
+                <ProbBar key={k} label={CLASS_INFO[k].short} value={item.model_all_probs[k]} color={CLASS_INFO[k].color} />
+              ))}
+            </div>
+            {/* Model B */}
+            <div style={{ flex: 1, minWidth: 160 }}>
+              <div style={{ fontSize: 10, color: "#475569", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
+                Model B (Spatial)
+              </div>
+              <div style={{ fontSize: 12, color: CLASS_INFO[item.model_spatial_pred]?.color, fontWeight: 600, marginBottom: 6 }}>
+                {item.model_spatial_pred}
+              </div>
+              {CLASS_KEYS.map(k => (
+                <ProbBar key={k} label={CLASS_INFO[k].short} value={item.model_spatial_probs[k]} color={CLASS_INFO[k].color} />
+              ))}
+            </div>
+          </div>
 
-_test_mol     = Chem.MolFromSmiles("c1ccccc1")
-PHARM_FP_SIZE = len(Generate.Gen2DFingerprint(_test_mol, _sig_factory))
+          {/* Full SMILES */}
+          <div style={{
+            marginTop: 14, background: "rgba(0,0,0,0.3)", borderRadius: 8,
+            padding: "8px 12px", fontFamily: "monospace", fontSize: 11, color: "#64748b",
+            wordBreak: "break-all",
+          }}>
+            {item.smiles}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
-_morgan_gen   = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
-FEATURE_TYPES = ["HBD", "HBA", "Hyd", "Aro", "PosI", "NegI"]
+/* ── Summary stats bar ── */
+function SummaryBar({ results }) {
+  const counts = { "PDE4B only": 0, "NE only": 0, "PDE4B + NE (Dual)": 0, error: 0 };
+  results.forEach(r => {
+    if (r.error) counts.error++;
+    else counts[r.prediction] = (counts[r.prediction] || 0) + 1;
+  });
+  const total = results.length;
+  return (
+    <div style={{
+      display: "flex", gap: 10, flexWrap: "wrap",
+      background: "rgba(255,255,255,0.02)",
+      border: "1px solid rgba(255,255,255,0.07)",
+      borderRadius: 12, padding: "14px 20px", marginBottom: 20,
+    }}>
+      <span style={{ fontSize: 12, color: "#475569", marginRight: 6, alignSelf: "center" }}>
+        {total} compound{total !== 1 ? "s" : ""} scanned
+      </span>
+      {CLASS_KEYS.map(k => counts[k] > 0 && (
+        <span key={k} style={{
+          fontSize: 11, padding: "3px 12px", borderRadius: 100,
+          background: `${CLASS_INFO[k].color}14`,
+          border: `1px solid ${CLASS_INFO[k].color}33`,
+          color: CLASS_INFO[k].color, fontWeight: 600,
+        }}>
+          {CLASS_INFO[k].icon} {CLASS_INFO[k].short}: {counts[k]}
+        </span>
+      ))}
+      {counts.error > 0 && (
+        <span style={{
+          fontSize: 11, padding: "3px 12px", borderRadius: 100,
+          background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)",
+          color: "#f87171", fontWeight: 600,
+        }}>
+          ✕ Errors: {counts.error}
+        </span>
+      )}
+      {/* Download CSV */}
+      <button onClick={() => downloadCSV(results)} style={{
+        marginLeft: "auto", fontSize: 11, padding: "3px 14px", borderRadius: 100,
+        background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+        color: "#94a3b8", cursor: "pointer",
+      }}>
+        ↓ Export CSV
+      </button>
+    </div>
+  );
+}
 
-print(f"SigFactory ready — PharmFP size: {PHARM_FP_SIZE} ✓")
+function downloadCSV(results) {
+  const header = ["smiles", "prediction", "confidence_pct", "models_agree",
+    "prob_pde4b", "prob_ne", "prob_dual", "model_a", "model_b"];
+  const rows = results.map(r => r.error
+    ? [r.smiles, "ERROR", "", "", "", "", "", "", ""]
+    : [
+        r.smiles, r.prediction, r.confidence_pct, r.models_agree,
+        r.ensemble_probs["PDE4B only"], r.ensemble_probs["NE only"], r.ensemble_probs["PDE4B + NE (Dual)"],
+        r.model_all_pred, r.model_spatial_pred,
+      ]
+  );
+  const csv = [header, ...rows].map(r => r.join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download = "pharosis_results.csv"; a.click();
+}
 
+/* ══════════════════════════════════════════════════
+   MAIN APP
+══════════════════════════════════════════════════ */
+export default function App() {
+  const [mode, setMode] = useState("text"); // "text" | "file"
+  const [textInput, setTextInput] = useState("");
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [dragOver, setDragOver] = useState(false);
+  const [fileName, setFileName] = useState("");
+  const [parsedSmiles, setParsedSmiles] = useState([]);
+  const fileRef = useRef();
 
-# ── Feature extraction (mirrors Step 5 Cell 9) ───────────────
-def get_molecular_features(smiles):
-    mol = Chem.MolFromSmiles(str(smiles))
-    if mol is None:
-        return None
+  /* Parse SMILES from text area or file */
+  const parseSmiles = (raw) =>
+    raw.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
 
-    features = {}
+  const handleFileLoad = (file) => {
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = e => {
+      const smilesList = parseSmiles(e.target.result);
+      setParsedSmiles(smilesList);
+    };
+    reader.readAsText(file);
+  };
 
-    # A. ECFP4
-    ecfp4 = _morgan_gen.GetFingerprint(mol)
-    for i, bit in enumerate(ecfp4):
-        features[f"ECFP4_{i}"] = int(bit)
+  const handleDrop = useCallback(e => {
+    e.preventDefault(); setDragOver(false);
+    handleFileLoad(e.dataTransfer.files[0]);
+  }, []);
 
-    # B. MACCS
-    maccs = MACCSkeys.GenMACCSKeys(mol)
-    for i, bit in enumerate(maccs):
-        features[f"MACCS_{i}"] = int(bit)
+  /* Run predictions */
+  const runPredictions = async () => {
+    const smilesList = mode === "text"
+      ? parseSmiles(textInput)
+      : parsedSmiles;
 
-    # C. Physicochemical
-    features["MW"]            = Descriptors.MolWt(mol)
-    features["LogP"]          = Descriptors.MolLogP(mol)
-    features["HBD"]           = rdMolDescriptors.CalcNumHBD(mol)
-    features["HBA"]           = rdMolDescriptors.CalcNumHBA(mol)
-    features["TPSA"]          = Descriptors.TPSA(mol)
-    features["RotBonds"]      = rdMolDescriptors.CalcNumRotatableBonds(mol)
-    features["AromaticRings"] = rdMolDescriptors.CalcNumAromaticRings(mol)
-    features["Rings"]         = rdMolDescriptors.CalcNumRings(mol)
-    features["HeavyAtoms"]    = mol.GetNumHeavyAtoms()
-    features["QED"]           = Descriptors.qed(mol)
+    if (!smilesList.length) return;
+    setLoading(true);
+    setResults([]);
+    setProgress({ done: 0, total: smilesList.length });
 
-    # D. 2D Pharmacophore
-    try:
-        pharm_fp = Generate.Gen2DFingerprint(mol, _sig_factory)
-        for i, bit in enumerate(pharm_fp):
-            features[f"PharmFP_{i}"] = int(bit)
-    except Exception:
-        for i in range(PHARM_FP_SIZE):
-            features[f"PharmFP_{i}"] = 0
+    const out = [];
+    for (let i = 0; i < smilesList.length; i++) {
+      const smi = smilesList[i];
+      try {
+        const res = await fetch(`${API_URL}/predict`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ smiles: smi }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Failed");
+        out.push(data);
+      } catch (err) {
+        out.push({ smiles: smi, error: err.message });
+      }
+      setProgress({ done: i + 1, total: smilesList.length });
+      setResults([...out]);
+    }
+    setLoading(false);
+  };
 
-    # E. Spatial features (zeros for new molecules — no 3D conformer)
-    for f1, f2 in combinations(FEATURE_TYPES, 2):
-        features[f"sp_dist_{f1}_{f2}"] = 0.0
-    for ft in FEATURE_TYPES:
-        features[f"sp_n_{ft}"] = 0.0
+  const successResults = results.filter(r => !r.error);
+  const errorResults   = results.filter(r => r.error);
 
-    return features
+  return (
+    <div style={{ minHeight: "100vh", color: "#e2e8f0", fontFamily: "'Inter', system-ui, sans-serif", position: "relative" }}>
+      <Background />
 
+      {/* ── Nav ── */}
+      <nav style={{
+        position: "sticky", top: 0, zIndex: 50,
+        borderBottom: "1px solid rgba(255,255,255,0.05)",
+        background: "rgba(6,9,18,0.85)", backdropFilter: "blur(16px)",
+        padding: "0 48px", height: 56,
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Logo size={26} />
+          <span style={{ fontWeight: 800, fontSize: 18, letterSpacing: -0.5 }}>
+            Pharosis
+          </span>
+          <span style={{
+            fontSize: 10, letterSpacing: 2, textTransform: "uppercase",
+            color: "#38bdf8", marginLeft: 6,
+            background: "rgba(56,189,248,0.08)",
+            border: "1px solid rgba(56,189,248,0.2)",
+            borderRadius: 100, padding: "2px 8px",
+          }}>Beta</span>
+        </div>
+        <div style={{ display: "flex", gap: 24, fontSize: 13, color: "#475569" }}>
+          {["Predict", "About", "Pipeline"].map(l => (
+            <a key={l} href={`#${l.toLowerCase()}`}
+              style={{ color: "#475569", textDecoration: "none", transition: "color 0.2s" }}
+              onMouseEnter={e => e.target.style.color = "#e2e8f0"}
+              onMouseLeave={e => e.target.style.color = "#475569"}
+            >{l}</a>
+          ))}
+        </div>
+      </nav>
 
-def features_to_arrays(feat_dict):
-    """Convert feature dict → (X_all, X_spatial) numpy arrays."""
-    all_vals     = [feat_dict.get(c, 0.0) for c in feat_cols_all]
-    spatial_vals = [feat_dict.get(c, 0.0) for c in feat_cols_sp]
-    return (
-        np.array(all_vals,     dtype=np.float32).reshape(1, -1),
-        np.array(spatial_vals, dtype=np.float32).reshape(1, -1),
-    )
+      <div style={{ position: "relative", zIndex: 1 }}>
 
+        {/* ── Hero ── */}
+        <div style={{ textAlign: "center", padding: "72px 48px 56px" }}>
+          <div style={{
+            display: "inline-flex", alignItems: "center", gap: 8,
+            fontSize: 11, letterSpacing: 3, textTransform: "uppercase",
+            color: "#38bdf8", border: "1px solid rgba(56,189,248,0.25)",
+            borderRadius: 100, padding: "5px 16px", marginBottom: 28,
+            background: "rgba(56,189,248,0.05)",
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#38bdf8", display: "inline-block" }} />
+            Polypharmacology Prediction Engine
+          </div>
 
-# ── Routes ───────────────────────────────────────────────────
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "model": "PharmoScan voting ensemble"})
+          <h1 style={{
+            fontSize: "clamp(30px,4.5vw,52px)", fontWeight: 900,
+            letterSpacing: -2, lineHeight: 1.08, margin: "0 0 20px",
+          }}>
+            Scan molecules for<br />
+            <span style={{
+              background: "linear-gradient(100deg, #38bdf8 0%, #818cf8 50%, #f472b6 100%)",
+              WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+            }}>
+              dual-target activity
+            </span>
+          </h1>
 
+          <p style={{
+            fontSize: 15, color: "#64748b", maxWidth: 500,
+            margin: "0 auto 0", lineHeight: 1.75,
+          }}>
+            Submit one or many SMILES strings — as text or a file — and Pharosis classifies each compound against PDE4B and Neutrophil Elastase using a 70/30 voting ensemble.
+          </p>
+        </div>
 
-@app.route("/predict", methods=["POST"])
-def predict():
-    body = request.get_json(silent=True)
-    if not body or "smiles" not in body:
-        return jsonify({"error": "Missing 'smiles' in request body"}), 400
+        {/* ── Predict panel ── */}
+        <div id="predict" style={{ maxWidth: 820, margin: "0 auto 80px", padding: "0 24px" }}>
 
-    smiles = body["smiles"].strip()
-    if not smiles:
-        return jsonify({"error": "Empty SMILES string"}), 400
+          {/* Mode toggle */}
+          <div style={{
+            display: "flex", gap: 4,
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 10, padding: 4,
+            width: "fit-content", marginBottom: 16,
+          }}>
+            {[["text", "✎  Text / paste"], ["file", "⊞  Upload file"]].map(([m, label]) => (
+              <button key={m} onClick={() => setMode(m)} style={{
+                padding: "7px 20px", borderRadius: 7, border: "none",
+                background: mode === m ? "rgba(56,189,248,0.15)" : "transparent",
+                color: mode === m ? "#38bdf8" : "#475569",
+                fontSize: 13, fontWeight: 600, cursor: "pointer",
+                transition: "all 0.2s",
+                outline: mode === m ? "1px solid rgba(56,189,248,0.3)" : "none",
+              }}>{label}</button>
+            ))}
+          </div>
 
-    # Validate SMILES
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return jsonify({"error": "Invalid SMILES string — could not parse molecule"}), 422
+          {/* Input area */}
+          <div style={{
+            background: "rgba(255,255,255,0.025)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 16, padding: 24, marginBottom: 16,
+          }}>
+            {mode === "text" ? (
+              <>
+                <div style={{ fontSize: 11, color: "#475569", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
+                  SMILES — one per line, or comma-separated
+                </div>
+                <textarea
+                  value={textInput}
+                  onChange={e => setTextInput(e.target.value)}
+                  placeholder={"O=C1CN(CCc2ccc(OC)c(OC)c2)CC1\nCC1=CC=C(C=C1)S(=O)(=O)NC2=CC=CC=C2OCC(=O)O\n..."}
+                  rows={5}
+                  style={{
+                    width: "100%", background: "rgba(0,0,0,0.3)",
+                    border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10,
+                    padding: "12px 14px", color: "#e2e8f0",
+                    fontSize: 12, fontFamily: "monospace", resize: "vertical",
+                    outline: "none", boxSizing: "border-box",
+                  }}
+                />
+                <div style={{ marginTop: 12 }}>
+                  <span style={{ fontSize: 11, color: "#334155", marginRight: 8 }}>Examples:</span>
+                  {EXAMPLES.map(ex => (
+                    <button key={ex.name} onClick={() => setTextInput(t => t ? t + "\n" + ex.smiles : ex.smiles)}
+                      style={{
+                        background: "rgba(255,255,255,0.04)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        borderRadius: 6, padding: "3px 10px",
+                        color: "#64748b", fontSize: 11, cursor: "pointer", marginRight: 6,
+                      }}>{ex.name}</button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              /* File drop zone */
+              <div
+                onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
+                onClick={() => fileRef.current.click()}
+                style={{
+                  border: `2px dashed ${dragOver ? "#38bdf8" : "rgba(255,255,255,0.1)"}`,
+                  borderRadius: 12, padding: "40px 20px", textAlign: "center",
+                  cursor: "pointer", transition: "border-color 0.2s",
+                  background: dragOver ? "rgba(56,189,248,0.04)" : "transparent",
+                }}>
+                <input ref={fileRef} type="file" accept=".txt,.csv,.smi"
+                  style={{ display: "none" }}
+                  onChange={e => handleFileLoad(e.target.files[0])} />
+                <div style={{ fontSize: 32, marginBottom: 12 }}>⊞</div>
+                {fileName ? (
+                  <>
+                    <div style={{ color: "#38bdf8", fontWeight: 600, marginBottom: 4 }}>{fileName}</div>
+                    <div style={{ color: "#64748b", fontSize: 13 }}>{parsedSmiles.length} SMILES parsed</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ color: "#94a3b8", marginBottom: 6 }}>Drop a .txt, .csv, or .smi file</div>
+                    <div style={{ color: "#334155", fontSize: 12 }}>or click to browse — one SMILES per line</div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
 
-    # Extract features
-    feat_dict = get_molecular_features(smiles)
-    if feat_dict is None:
-        return jsonify({"error": "Feature extraction failed"}), 500
+          {/* Run button */}
+          <button
+            onClick={runPredictions}
+            disabled={loading || (mode === "text" ? !textInput.trim() : !parsedSmiles.length)}
+            style={{
+              width: "100%", padding: "14px",
+              background: loading
+                ? "rgba(56,189,248,0.15)"
+                : "linear-gradient(135deg, #0ea5e9, #6366f1)",
+              border: "none", borderRadius: 12,
+              color: loading ? "#38bdf8" : "#fff",
+              fontSize: 15, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer",
+              transition: "opacity 0.2s",
+              letterSpacing: 0.3,
+            }}
+          >
+            {loading
+              ? `Scanning ${progress.done} / ${progress.total}...`
+              : `Run Pharosis →`}
+          </button>
 
-    X_all, X_sp = features_to_arrays(feat_dict)
+          {/* Progress bar */}
+          {loading && (
+            <div style={{ marginTop: 10, background: "rgba(255,255,255,0.05)", borderRadius: 4, height: 4 }}>
+              <div style={{
+                width: `${(progress.done / progress.total) * 100}%`,
+                height: "100%",
+                background: "linear-gradient(90deg,#38bdf8,#818cf8)",
+                borderRadius: 4, transition: "width 0.3s",
+              }} />
+            </div>
+          )}
 
-    # Inference
-    pa = model_all.predict_proba(X_all)[0]      # shape (3,)
-    ps = model_spatial.predict_proba(X_sp)[0]   # shape (3,)
-    pe = W_ALL * pa + W_SP * ps                 # ensemble
+          {/* Results */}
+          {results.length > 0 && (
+            <div style={{ marginTop: 28 }}>
+              <SummaryBar results={results} />
 
-    pred_idx = int(np.argmax(pe))
-    pred_all = int(np.argmax(pa))
-    pred_sp  = int(np.argmax(ps))
+              {successResults.map((r, i) => <ResultCard key={i} item={r} index={i} />)}
 
-    class_names = [label_map_inv[i] for i in range(3)]
+              {errorResults.length > 0 && (
+                <div style={{
+                  background: "rgba(239,68,68,0.05)",
+                  border: "1px solid rgba(239,68,68,0.2)",
+                  borderRadius: 12, padding: "16px 18px", marginTop: 8,
+                }}>
+                  <div style={{ fontSize: 12, color: "#f87171", fontWeight: 600, marginBottom: 8 }}>
+                    Failed SMILES ({errorResults.length})
+                  </div>
+                  {errorResults.map((r, i) => (
+                    <div key={i} style={{ fontSize: 11, color: "#64748b", fontFamily: "monospace", marginBottom: 4 }}>
+                      ✕ {r.smiles} — {r.error}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
-    return jsonify({
-        # Ensemble
-        "prediction"          : label_map_inv[pred_idx],
-        "confidence_pct"      : round(float(pe[pred_idx]) * 100, 1),
-        "ensemble_probs"      : {class_names[i]: round(float(pe[i]), 4) for i in range(3)},
-        # Model A
-        "model_all_pred"      : label_map_inv[pred_all],
-        "model_all_confidence": round(float(pa[pred_all]), 4),
-        "model_all_probs"     : {class_names[i]: round(float(pa[i]), 4) for i in range(3)},
-        # Model B
-        "model_spatial_pred"      : label_map_inv[pred_sp],
-        "model_spatial_confidence": round(float(ps[pred_sp]), 4),
-        "model_spatial_probs"     : {class_names[i]: round(float(ps[i]), 4) for i in range(3)},
-        # Agreement
-        "models_agree": pred_all == pred_sp,
-        "smiles"      : smiles,
-    })
+        {/* ── About ── */}
+        <div id="about" style={{
+          maxWidth: 860, margin: "0 auto 80px", padding: "0 24px",
+          borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 64,
+        }}>
+          <div style={{ fontSize: 11, color: "#38bdf8", letterSpacing: 3, textTransform: "uppercase", marginBottom: 14 }}>About</div>
+          <h2 style={{ fontSize: 28, fontWeight: 800, marginBottom: 18, letterSpacing: -0.5 }}>What is Pharosis?</h2>
+          <p style={{ color: "#64748b", lineHeight: 1.85, fontSize: 15, maxWidth: 680 }}>
+            Pharosis is a research tool developed as part of a computational drug discovery thesis. It predicts
+            whether a small molecule selectively inhibits <strong style={{ color: "#38bdf8" }}>PDE4B</strong>,
+            selectively inhibits <strong style={{ color: "#818cf8" }}>Neutrophil Elastase (NE)</strong>, or hits
+            both targets simultaneously — a polypharmacology profile of interest in
+            <strong style={{ color: "#f472b6" }}> inflammatory disease</strong> research. Submit any number of
+            compounds at once and export results as CSV.
+          </p>
+        </div>
 
+        {/* ── Pipeline ── */}
+        <div id="pipeline" style={{ maxWidth: 860, margin: "0 auto 100px", padding: "0 24px" }}>
+          <div style={{ fontSize: 11, color: "#38bdf8", letterSpacing: 3, textTransform: "uppercase", marginBottom: 14 }}>Pipeline</div>
+          <h2 style={{ fontSize: 28, fontWeight: 800, marginBottom: 32, letterSpacing: -0.5 }}>How it works</h2>
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 12, marginBottom: 28 }}>
+            {[
+              { title: "SMILES Parsing", desc: "Input is validated and parsed by RDKit. Invalid structures are flagged immediately.", col: "#38bdf8" },
+              { title: "Feature Extraction", desc: "3,653 features: ECFP4, MACCS keys, 10 physicochemical descriptors, 2D pharmacophore, and 21 spatial 3D distances.", col: "#818cf8" },
+              { title: "Dual Inference", desc: "Model A uses all 3,653 features. Model B uses only the 21 rotation-invariant spatial pharmacophore distances.", col: "#f472b6" },
+              { title: "Soft Voting 70/30", desc: "Probability outputs are blended: 70% from Model A, 30% from Model B. Final class is the highest probability.", col: "#38bdf8" },
+            ].map(s => (
+              <div key={s.title} style={{
+                background: "rgba(255,255,255,0.02)",
+                border: `1px solid ${s.col}22`,
+                borderTop: `2px solid ${s.col}`,
+                borderRadius: 12, padding: "18px 18px 20px",
+              }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: s.col, marginBottom: 8 }}>{s.title}</div>
+                <div style={{ fontSize: 12, color: "#64748b", lineHeight: 1.65 }}>{s.desc}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Metrics */}
+          <div style={{
+            display: "grid", gridTemplateColumns: "repeat(4,1fr)",
+            background: "rgba(255,255,255,0.02)",
+            border: "1px solid rgba(255,255,255,0.06)",
+            borderRadius: 14, overflow: "hidden",
+          }}>
+            {[
+              { label: "Macro F1", value: "0.859", sub: "Ensemble 70/30" },
+              { label: "ROC-AUC", value: "0.968", sub: "One-vs-Rest" },
+              { label: "Bal. Accuracy", value: "0.840", sub: "20% test set" },
+              { label: "Compounds", value: "5,845", sub: "Training set" },
+            ].map((m, i) => (
+              <div key={m.label} style={{
+                padding: "22px 16px", textAlign: "center",
+                borderRight: i < 3 ? "1px solid rgba(255,255,255,0.05)" : "none",
+              }}>
+                <div style={{ fontSize: 26, fontWeight: 900, color: "#38bdf8", fontFamily: "monospace", letterSpacing: -1 }}>{m.value}</div>
+                <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{m.label}</div>
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 2 }}>{m.sub}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{
+          borderTop: "1px solid rgba(255,255,255,0.04)",
+          padding: "22px 48px",
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          fontSize: 12, color: "#1e293b",
+        }}>
+          <span>Pharosis — Computational Drug Discovery Research</span>
+          <span>RDKit · XGBoost · React · Vite</span>
+        </div>
+      </div>
+    </div>
+  );
+}
