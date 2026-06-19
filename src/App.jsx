@@ -1,8 +1,3 @@
-"""
-PharmoScan — Flask Backend
-Loads the voting ensemble and serves predictions via /predict
-"""
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import joblib
