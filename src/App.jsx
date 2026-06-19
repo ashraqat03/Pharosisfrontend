@@ -1,466 +1,218 @@
-import { useState } from "react";
+"""
+PharmoScan — Flask Backend
+Loads the voting ensemble and serves predictions via /predict
+"""
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import joblib
+import numpy as np
+import os
 
-const EXAMPLE_MOLECULES = [
-  { name: "Rolipram (PDE4B inhibitor)", smiles: "O=C1CN(CCc2ccc(OC)c(OC)c2)CC1" },
-  { name: "Sivelestat (NE inhibitor)", smiles: "CC1=CC=C(C=C1)S(=O)(=O)NC2=CC=CC=C2OCC(=O)O" },
-  { name: "Roflumilast (PDE4B)", smiles: "O=C(Nc1ccc(Cl)cc1Cl)c1cnc(OCC(F)(F)F)c(OCC(F)(F)F)c1" },
-];
+# ── RDKit ────────────────────────────────────────────────────
+from rdkit import Chem
+from rdkit.Chem import Descriptors, rdMolDescriptors, MACCSkeys
+from rdkit.Chem.Pharm2D import Generate
+from rdkit.Chem.Pharm2D.SigFactory import SigFactory
+from rdkit import RDLogger
+from rdkit.Chem import ChemicalFeatures
+from rdkit.Chem import rdFingerprintGenerator
+from itertools import combinations
 
-const CLASS_INFO = {
-  "PDE4B only": {
-    color: "#3b82f6",
-    bg: "rgba(59,130,246,0.1)",
-    border: "rgba(59,130,246,0.4)",
-    desc: "This molecule is predicted to selectively inhibit PDE4B. It shows structural similarity to known PDE4B actives but lacks the pharmacophore geometry associated with Neutrophil Elastase binding.",
-    icon: "◈",
-  },
-  "NE only": {
-    color: "#06b6d4",
-    bg: "rgba(6,182,212,0.1)",
-    border: "rgba(6,182,212,0.4)",
-    desc: "This molecule is predicted to selectively inhibit Neutrophil Elastase (NE). Its 3D pharmacophore profile matches NE active sites but does not overlap with PDE4B binding requirements.",
-    icon: "◇",
-  },
-  "PDE4B + NE (Dual)": {
-    color: "#a855f7",
-    bg: "rgba(168,85,247,0.1)",
-    border: "rgba(168,85,247,0.4)",
-    desc: "This molecule is predicted to inhibit both PDE4B and Neutrophil Elastase simultaneously — a rare polypharmacology profile. Dual-target compounds are of high interest for inflammatory disease therapeutics.",
-    icon: "⬡",
-  },
-};
+RDLogger.DisableLog("rdApp.*")
 
-function ConfidenceBar({ label, value, color }) {
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontSize: 12, color: "#94a3b8", fontFamily: "monospace" }}>{label}</span>
-        <span style={{ fontSize: 12, color, fontWeight: 700, fontFamily: "monospace" }}>
-          {(value * 100).toFixed(1)}%
-        </span>
-      </div>
-      <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: 4, height: 6, overflow: "hidden" }}>
-        <div
-          style={{
-            width: `${value * 100}%`,
-            height: "100%",
-            background: `linear-gradient(90deg, ${color}88, ${color})`,
-            borderRadius: 4,
-            transition: "width 1s cubic-bezier(0.4,0,0.2,1)",
-          }}
-        />
-      </div>
-    </div>
-  );
-}
+app = Flask(__name__)
+CORS(app)
 
-function ModelCard({ title, prediction, confidence, probs, agree }) {
-  const info = CLASS_INFO[prediction] || {};
-  return (
-    <div
-      style={{
-        background: "rgba(255,255,255,0.03)",
-        border: `1px solid rgba(255,255,255,0.08)`,
-        borderRadius: 12,
-        padding: "20px 22px",
-        flex: 1,
-      }}
-    >
-      <div style={{ fontSize: 11, color: "#64748b", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
-        {title}
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-        <span style={{ fontSize: 20, color: info.color }}>{info.icon}</span>
-        <span style={{ fontSize: 14, fontWeight: 600, color: info.color }}>{prediction}</span>
-      </div>
-      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 12 }}>
-        Confidence:{" "}
-        <span style={{ color: info.color, fontWeight: 700 }}>{(confidence * 100).toFixed(1)}%</span>
-      </div>
-      {probs && (
-        <div>
-          {Object.entries(probs).map(([k, v]) => (
-            <ConfidenceBar key={k} label={k} value={v} color={CLASS_INFO[k]?.color || "#94a3b8"} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+# ── Load ensemble ────────────────────────────────────────────
+print("Loading ensemble...")
+ensemble = joblib.load("voting_ensemble.pkl")
 
-export default function App() {
-  const [smiles, setSmiles] = useState("");
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+model_all     = ensemble["model_all"]
+model_spatial = ensemble["model_spatial"]
+feat_cols_all = ensemble["feat_cols_all"]
+feat_cols_sp  = ensemble["feat_cols_spatial"]
+label_map_inv = ensemble["label_map_inv"]   # {0: 'PDE4B only', 1: 'NE only', 2: 'PDE4B + NE (Dual)'}
+W_ALL         = ensemble["w_all"]           # 0.7
+W_SP          = ensemble["w_spatial"]       # 0.3
+print(f"Ensemble loaded ✓  weights: {W_ALL}/{W_SP}")
 
-  const predict = async (smilesInput) => {
-    const s = smilesInput || smiles;
-    if (!s.trim()) return;
-    setLoading(true);
-    setError("");
-    setResult(null);
-    try {
-      const res = await fetch(`${API_URL}/predict`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ smiles: s.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Prediction failed");
-      setResult(data);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+# ── Rebuild SigFactory (same as Step 5 / Step 6) ─────────────
+GOBBI_FDEF = """
+AtomType NDonor [N;!H0;v3,v4&+1]
+AtomType ChalcDonor [O,S;H1;+0]
+DefineFeature SingleAtomDonor [{NDonor},{ChalcDonor}]
+  Family HBDonor
+  Weights 1
+EndFeature
 
-  const mainInfo = result ? CLASS_INFO[result.prediction] : null;
+AtomType NAcceptor [$([N;H0;$(N(~[!#1])(~[!#1])~[!#1])])]
+AtomType NAcceptor2 [n;H0;+0]
+AtomType OAcceptor [O;H0;+0]
+DefineFeature SingleAtomAcceptor [{NAcceptor},{NAcceptor2},{OAcceptor}]
+  Family HBAcceptor
+  Weights 1
+EndFeature
 
-  return (
-    <div style={{ minHeight: "100vh", background: "#080c14", color: "#e2e8f0", fontFamily: "'Inter', sans-serif" }}>
-      {/* ── Nav ── */}
-      <nav style={{
-        borderBottom: "1px solid rgba(255,255,255,0.06)",
-        padding: "0 40px",
-        height: 58,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        position: "sticky",
-        top: 0,
-        background: "rgba(8,12,20,0.92)",
-        backdropFilter: "blur(12px)",
-        zIndex: 100,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <svg width="26" height="26" viewBox="0 0 26 26" fill="none">
-            <polygon points="13,2 24,8 24,18 13,24 2,18 2,8" stroke="#3b82f6" strokeWidth="1.5" fill="rgba(59,130,246,0.08)" />
-            <polygon points="13,7 19,10.5 19,17.5 13,21 7,17.5 7,10.5" stroke="#06b6d4" strokeWidth="1" fill="rgba(6,182,212,0.06)" />
-            <circle cx="13" cy="13" r="2.5" fill="#a855f7" />
-          </svg>
-          <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: -0.5 }}>
-            Phar<span style={{ color: "#3b82f6" }}>osis</span>
-          </span>
-        </div>
-        <div style={{ display: "flex", gap: 28, fontSize: 13, color: "#64748b" }}>
-          <a href="#predict" style={{ color: "#64748b", textDecoration: "none" }}>Predict</a>
-          <a href="#about" style={{ color: "#64748b", textDecoration: "none" }}>About</a>
-          <a href="#pipeline" style={{ color: "#64748b", textDecoration: "none" }}>Pipeline</a>
-        </div>
-      </nav>
+DefineFeature AcidicGroup [C,S](=[O,S,P])-[O;H1,H0&-1]
+  Family NegIonizable
+  Weights 1.0,1.0,1.0
+EndFeature
 
-      {/* ── Hero ── */}
-      <div style={{ textAlign: "center", padding: "80px 40px 60px", position: "relative", overflow: "hidden" }}>
-        {/* background glow */}
-        <div style={{
-          position: "absolute", top: "50%", left: "50%",
-          transform: "translate(-50%, -50%)",
-          width: 600, height: 300,
-          background: "radial-gradient(ellipse, rgba(59,130,246,0.07) 0%, transparent 70%)",
-          pointerEvents: "none",
-        }} />
-        <div style={{
-          display: "inline-block",
-          fontSize: 11, letterSpacing: 3, textTransform: "uppercase",
-          color: "#3b82f6", border: "1px solid rgba(59,130,246,0.3)",
-          borderRadius: 100, padding: "4px 14px", marginBottom: 24,
-        }}>
-          Polypharmacology Prediction
-        </div>
-        <h1 style={{
-          fontSize: "clamp(32px, 5vw, 54px)",
-          fontWeight: 800, letterSpacing: -1.5,
-          margin: "0 0 16px",
-          lineHeight: 1.1,
-        }}>
-          Predict dual-target activity<br />
-          <span style={{
-            background: "linear-gradient(90deg, #3b82f6, #06b6d4, #a855f7)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
-          }}>
-            from a single SMILES string
-          </span>
-        </h1>
-        <p style={{ fontSize: 16, color: "#64748b", maxWidth: 520, margin: "0 auto 48px", lineHeight: 1.7 }}>
-          A voting ensemble of two XGBoost models — trained on 3,653 molecular features and 21 spatial pharmacophore distances — to classify compounds as PDE4B-selective, NE-selective, or dual-target.
-        </p>
+DefineFeature BasicGroup [N;H1&+0,H2&+0]!@[!N]
+  Family PosIonizable
+  Weights 1.0,1.0
+EndFeature
 
-        {/* ── Input ── */}
-        <div id="predict" style={{ maxWidth: 680, margin: "0 auto" }}>
-          <div style={{
-            background: "rgba(255,255,255,0.03)",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 16,
-            padding: 24,
-          }}>
-            <label style={{ fontSize: 12, color: "#64748b", letterSpacing: 2, textTransform: "uppercase", display: "block", marginBottom: 10 }}>
-              SMILES Input
-            </label>
-            <div style={{ display: "flex", gap: 10 }}>
-              <input
-                value={smiles}
-                onChange={e => setSmiles(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && predict()}
-                placeholder="e.g. CC1=CC=C(C=C1)S(=O)(=O)NC2=CC..."
-                style={{
-                  flex: 1,
-                  background: "rgba(255,255,255,0.05)",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 10,
-                  padding: "12px 16px",
-                  color: "#e2e8f0",
-                  fontSize: 13,
-                  fontFamily: "monospace",
-                  outline: "none",
-                }}
-              />
-              <button
-                onClick={() => predict()}
-                disabled={loading || !smiles.trim()}
-                style={{
-                  background: loading ? "rgba(59,130,246,0.3)" : "linear-gradient(135deg, #3b82f6, #2563eb)",
-                  border: "none",
-                  borderRadius: 10,
-                  padding: "12px 28px",
-                  color: "#fff",
-                  fontWeight: 600,
-                  fontSize: 14,
-                  cursor: loading ? "not-allowed" : "pointer",
-                  whiteSpace: "nowrap",
-                  transition: "opacity 0.2s",
-                }}
-              >
-                {loading ? "Scanning..." : "Predict →"}
-              </button>
-            </div>
+AtomType Carbon_Aromatic [c]
+AtomType Carbon_NonPolar [C;H0&r3&!$(CC(=O)N)&!$(CC(=O)O),$([CH,CH2;r3])]
+DefineFeature Hydrophobe [{Carbon_Aromatic},{Carbon_NonPolar}]
+  Family Hydrophobe
+  Weights 1.0
+EndFeature
 
-            {/* Example molecules */}
-            <div style={{ marginTop: 14 }}>
-              <span style={{ fontSize: 11, color: "#475569", marginRight: 10 }}>Try an example:</span>
-              {EXAMPLE_MOLECULES.map(m => (
-                <button
-                  key={m.name}
-                  onClick={() => { setSmiles(m.smiles); predict(m.smiles); }}
-                  style={{
-                    background: "rgba(255,255,255,0.04)",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    borderRadius: 6,
-                    padding: "4px 10px",
-                    color: "#94a3b8",
-                    fontSize: 11,
-                    cursor: "pointer",
-                    marginRight: 6,
-                    marginTop: 6,
-                  }}
-                >
-                  {m.name}
-                </button>
-              ))}
-            </div>
-          </div>
+AtomType AromN [n]
+AtomType AromC [c]
+DefineFeature Aromatic [{AromN},{AromC}]
+  Family Aromatic
+  Weights 1.0
+EndFeature
+"""
 
-          {/* Error */}
-          {error && (
-            <div style={{
-              marginTop: 16,
-              background: "rgba(239,68,68,0.08)",
-              border: "1px solid rgba(239,68,68,0.3)",
-              borderRadius: 10,
-              padding: "12px 16px",
-              color: "#f87171",
-              fontSize: 13,
-            }}>
-              ✕ {error}
-            </div>
-          )}
+_fdef_path = "/tmp/gobbi.fdef"
+with open(_fdef_path, "w") as f:
+    f.write(GOBBI_FDEF)
 
-          {/* ── Results ── */}
-          {result && mainInfo && (
-            <div style={{ marginTop: 24 }}>
-              {/* Main verdict */}
-              <div style={{
-                background: mainInfo.bg,
-                border: `1px solid ${mainInfo.border}`,
-                borderRadius: 16,
-                padding: "28px 28px 24px",
-                marginBottom: 16,
-                position: "relative",
-                overflow: "hidden",
-              }}>
-                <div style={{
-                  position: "absolute", top: -30, right: -30,
-                  fontSize: 120, opacity: 0.04, color: mainInfo.color,
-                  fontWeight: 900, pointerEvents: "none",
-                }}>
-                  {mainInfo.icon}
-                </div>
+_feat_factory = ChemicalFeatures.BuildFeatureFactory(_fdef_path)
+_sig_factory  = SigFactory(_feat_factory, minPointCount=2, maxPointCount=3)
+_sig_factory.SetBins([(0, 2), (2, 5), (5, 8)])
+_sig_factory.Init()
 
-                <div style={{ fontSize: 11, color: mainInfo.color, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>
-                  Ensemble Prediction
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-                  <span style={{ fontSize: 28, color: mainInfo.color }}>{mainInfo.icon}</span>
-                  <span style={{ fontSize: 24, fontWeight: 800, color: mainInfo.color }}>
-                    {result.prediction}
-                  </span>
-                  <span style={{
-                    marginLeft: "auto",
-                    background: mainInfo.bg,
-                    border: `1px solid ${mainInfo.border}`,
-                    borderRadius: 8,
-                    padding: "6px 14px",
-                    fontSize: 18,
-                    fontWeight: 700,
-                    color: mainInfo.color,
-                    fontFamily: "monospace",
-                  }}>
-                    {result.confidence_pct}%
-                  </span>
-                </div>
+_test_mol     = Chem.MolFromSmiles("c1ccccc1")
+PHARM_FP_SIZE = len(Generate.Gen2DFingerprint(_test_mol, _sig_factory))
 
-                {/* Agree badge */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-                  <span style={{
-                    fontSize: 11,
-                    padding: "3px 10px",
-                    borderRadius: 100,
-                    background: result.models_agree ? "rgba(34,197,94,0.1)" : "rgba(245,158,11,0.1)",
-                    border: `1px solid ${result.models_agree ? "rgba(34,197,94,0.3)" : "rgba(245,158,11,0.3)"}`,
-                    color: result.models_agree ? "#4ade80" : "#fbbf24",
-                  }}>
-                    {result.models_agree ? "✓ Both models agree" : "⚠ Models disagree — treat with caution"}
-                  </span>
-                </div>
+_morgan_gen   = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
+FEATURE_TYPES = ["HBD", "HBA", "Hyd", "Aro", "PosI", "NegI"]
 
-                <p style={{ fontSize: 13, color: "#94a3b8", lineHeight: 1.7, margin: 0 }}>
-                  {mainInfo.desc}
-                </p>
-              </div>
+print(f"SigFactory ready — PharmFP size: {PHARM_FP_SIZE} ✓")
 
-              {/* Ensemble probability bars */}
-              <div style={{
-                background: "rgba(255,255,255,0.02)",
-                border: "1px solid rgba(255,255,255,0.07)",
-                borderRadius: 12,
-                padding: "18px 22px",
-                marginBottom: 14,
-              }}>
-                <div style={{ fontSize: 11, color: "#475569", letterSpacing: 2, textTransform: "uppercase", marginBottom: 14 }}>
-                  Ensemble Probability Breakdown
-                </div>
-                {Object.entries(result.ensemble_probs).map(([k, v]) => (
-                  <ConfidenceBar key={k} label={k} value={v} color={CLASS_INFO[k]?.color || "#94a3b8"} />
-                ))}
-              </div>
 
-              {/* Per-model cards */}
-              <div style={{ display: "flex", gap: 12 }}>
-                <ModelCard
-                  title="Model A — All Features (3,653)"
-                  prediction={result.model_all_pred}
-                  confidence={result.model_all_confidence}
-                  probs={result.model_all_probs}
-                />
-                <ModelCard
-                  title="Model B — Spatial Only (21)"
-                  prediction={result.model_spatial_pred}
-                  confidence={result.model_spatial_confidence}
-                  probs={result.model_spatial_probs}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+# ── Feature extraction (mirrors Step 5 Cell 9) ───────────────
+def get_molecular_features(smiles):
+    mol = Chem.MolFromSmiles(str(smiles))
+    if mol is None:
+        return None
 
-      {/* ── About ── */}
-      <div id="about" style={{ maxWidth: 900, margin: "80px auto", padding: "0 40px" }}>
-        <div style={{ fontSize: 11, color: "#3b82f6", letterSpacing: 3, textTransform: "uppercase", marginBottom: 12 }}>
-          About
-        </div>
-        <h2 style={{ fontSize: 28, fontWeight: 700, marginBottom: 16, letterSpacing: -0.5 }}>
-          What is Pharosis?
-        </h2>
-        <p style={{ color: "#64748b", lineHeight: 1.8, fontSize: 15, maxWidth: 700 }}>
-          Pharosis is a machine-learning tool developed to predict polypharmacology in small molecules — specifically, whether a compound inhibits <strong style={{ color: "#e2e8f0" }}>PDE4B</strong>, <strong style={{ color: "#e2e8f0" }}>Neutrophil Elastase (NE)</strong>, or both simultaneously. Dual-target inhibition is a promising strategy for inflammatory diseases where single-target therapies have shown limited efficacy.
-        </p>
-      </div>
+    features = {}
 
-      {/* ── Pipeline ── */}
-      <div id="pipeline" style={{ maxWidth: 900, margin: "0 auto 100px", padding: "0 40px" }}>
-        <div style={{ fontSize: 11, color: "#3b82f6", letterSpacing: 3, textTransform: "uppercase", marginBottom: 12 }}>
-          Pipeline
-        </div>
-        <h2 style={{ fontSize: 28, fontWeight: 700, marginBottom: 32, letterSpacing: -0.5 }}>
-          How it works
-        </h2>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 14 }}>
-          {[
-            { step: "01", title: "SMILES Input", desc: "A canonical SMILES string is parsed and validated using RDKit." },
-            { step: "02", title: "Feature Extraction", desc: "3,653 features computed: ECFP4, MACCS keys, RDKit descriptors, 2D pharmacophore, and 21 spatial 3D pharmacophore distances." },
-            { step: "03", title: "Dual Model Inference", desc: "Model A uses all 3,653 features. Model B uses only the 21 spatial features — an independent geometric view." },
-            { step: "04", title: "Soft Voting (70/30)", desc: "Probability outputs are blended: 70% Model A, 30% Model B, combining structural and geometric signals." },
-          ].map(s => (
-            <div key={s.step} style={{
-              background: "rgba(255,255,255,0.02)",
-              border: "1px solid rgba(255,255,255,0.06)",
-              borderRadius: 12,
-              padding: "20px 20px 22px",
-            }}>
-              <div style={{ fontSize: 11, color: "#3b82f6", fontFamily: "monospace", marginBottom: 10 }}>{s.step}</div>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>{s.title}</div>
-              <div style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6 }}>{s.desc}</div>
-            </div>
-          ))}
-        </div>
+    # A. ECFP4
+    ecfp4 = _morgan_gen.GetFingerprint(mol)
+    for i, bit in enumerate(ecfp4):
+        features[f"ECFP4_{i}"] = int(bit)
 
-        {/* Metrics strip */}
-        <div style={{
-          display: "flex", gap: 0,
-          marginTop: 32,
-          background: "rgba(255,255,255,0.02)",
-          border: "1px solid rgba(255,255,255,0.06)",
-          borderRadius: 12,
-          overflow: "hidden",
-        }}>
-          {[
-            { label: "Macro F1", value: "0.859", sub: "Ensemble (70/30)" },
-            { label: "ROC-AUC", value: "0.968", sub: "One-vs-Rest" },
-            { label: "Balanced Acc.", value: "0.840", sub: "Test set (20%)" },
-            { label: "Training set", value: "5,845", sub: "Unique compounds" },
-          ].map((m, i) => (
-            <div key={m.label} style={{
-              flex: 1,
-              padding: "22px 20px",
-              borderRight: i < 3 ? "1px solid rgba(255,255,255,0.06)" : "none",
-              textAlign: "center",
-            }}>
-              <div style={{ fontSize: 26, fontWeight: 800, color: "#3b82f6", fontFamily: "monospace" }}>{m.value}</div>
-              <div style={{ fontSize: 12, fontWeight: 600, marginTop: 4 }}>{m.label}</div>
-              <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>{m.sub}</div>
-            </div>
-          ))}
-        </div>
-      </div>
+    # B. MACCS
+    maccs = MACCSkeys.GenMACCSKeys(mol)
+    for i, bit in enumerate(maccs):
+        features[f"MACCS_{i}"] = int(bit)
 
-      {/* ── Footer ── */}
-      <div style={{
-        borderTop: "1px solid rgba(255,255,255,0.05)",
-        padding: "24px 40px",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        fontSize: 12,
-        color: "#334155",
-      }}>
-        <span>Pharosis — Thesis Research Tool</span>
-        <span>Built with RDKit · XGBoost · React</span>
-      </div>
-    </div>
-  );
-}
+    # C. Physicochemical
+    features["MW"]            = Descriptors.MolWt(mol)
+    features["LogP"]          = Descriptors.MolLogP(mol)
+    features["HBD"]           = rdMolDescriptors.CalcNumHBD(mol)
+    features["HBA"]           = rdMolDescriptors.CalcNumHBA(mol)
+    features["TPSA"]          = Descriptors.TPSA(mol)
+    features["RotBonds"]      = rdMolDescriptors.CalcNumRotatableBonds(mol)
+    features["AromaticRings"] = rdMolDescriptors.CalcNumAromaticRings(mol)
+    features["Rings"]         = rdMolDescriptors.CalcNumRings(mol)
+    features["HeavyAtoms"]    = mol.GetNumHeavyAtoms()
+    features["QED"]           = Descriptors.qed(mol)
+
+    # D. 2D Pharmacophore
+    try:
+        pharm_fp = Generate.Gen2DFingerprint(mol, _sig_factory)
+        for i, bit in enumerate(pharm_fp):
+            features[f"PharmFP_{i}"] = int(bit)
+    except Exception:
+        for i in range(PHARM_FP_SIZE):
+            features[f"PharmFP_{i}"] = 0
+
+    # E. Spatial features (zeros for new molecules — no 3D conformer)
+    for f1, f2 in combinations(FEATURE_TYPES, 2):
+        features[f"sp_dist_{f1}_{f2}"] = 0.0
+    for ft in FEATURE_TYPES:
+        features[f"sp_n_{ft}"] = 0.0
+
+    return features
+
+
+def features_to_arrays(feat_dict):
+    """Convert feature dict → (X_all, X_spatial) numpy arrays."""
+    all_vals     = [feat_dict.get(c, 0.0) for c in feat_cols_all]
+    spatial_vals = [feat_dict.get(c, 0.0) for c in feat_cols_sp]
+    return (
+        np.array(all_vals,     dtype=np.float32).reshape(1, -1),
+        np.array(spatial_vals, dtype=np.float32).reshape(1, -1),
+    )
+
+
+# ── Routes ───────────────────────────────────────────────────
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "model": "PharmoScan voting ensemble"})
+
+
+@app.route("/predict", methods=["POST"])
+def predict():
+    body = request.get_json(silent=True)
+    if not body or "smiles" not in body:
+        return jsonify({"error": "Missing 'smiles' in request body"}), 400
+
+    smiles = body["smiles"].strip()
+    if not smiles:
+        return jsonify({"error": "Empty SMILES string"}), 400
+
+    # Validate SMILES
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return jsonify({"error": "Invalid SMILES string — could not parse molecule"}), 422
+
+    # Extract features
+    feat_dict = get_molecular_features(smiles)
+    if feat_dict is None:
+        return jsonify({"error": "Feature extraction failed"}), 500
+
+    X_all, X_sp = features_to_arrays(feat_dict)
+
+    # Inference
+    pa = model_all.predict_proba(X_all)[0]      # shape (3,)
+    ps = model_spatial.predict_proba(X_sp)[0]   # shape (3,)
+    pe = W_ALL * pa + W_SP * ps                 # ensemble
+
+    pred_idx = int(np.argmax(pe))
+    pred_all = int(np.argmax(pa))
+    pred_sp  = int(np.argmax(ps))
+
+    class_names = [label_map_inv[i] for i in range(3)]
+
+    return jsonify({
+        # Ensemble
+        "prediction"          : label_map_inv[pred_idx],
+        "confidence_pct"      : round(float(pe[pred_idx]) * 100, 1),
+        "ensemble_probs"      : {class_names[i]: round(float(pe[i]), 4) for i in range(3)},
+        # Model A
+        "model_all_pred"      : label_map_inv[pred_all],
+        "model_all_confidence": round(float(pa[pred_all]), 4),
+        "model_all_probs"     : {class_names[i]: round(float(pa[i]), 4) for i in range(3)},
+        # Model B
+        "model_spatial_pred"      : label_map_inv[pred_sp],
+        "model_spatial_confidence": round(float(ps[pred_sp]), 4),
+        "model_spatial_probs"     : {class_names[i]: round(float(ps[i]), 4) for i in range(3)},
+        # Agreement
+        "models_agree": pred_all == pred_sp,
+        "smiles"      : smiles,
+    })
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
